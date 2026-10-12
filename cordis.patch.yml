@@ -1,0 +1,6 @@
+# dsh-plugin-future-session bundle patch: 挂载一行，交给 profile 的
+# dsh.profile.bundles 自动应用（与 dsh-plugin-context-trim 同款机制）。
+# `name` 必须等于 package.json 的 `name`。严禁在 profile 层再 insert 同 id。
+- insert:
+    - id: dsh-plugin-future-session
+      name: dsh-plugin-future-session
