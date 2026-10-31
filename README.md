@@ -8,7 +8,7 @@
           只把结论作为这次工具调用的返回值送回 → 对比 → 输出
 ```
 
-现实会话的上下文里**只有「一次工具调用 + 一份结论」**，搜索过程、文件目录等噪音全部留在未来会话里。未来会话由核心原生 subagent **fork 提供方**派生，继承现实会话全部已完成轮次前缀——两边系统提示词与工具面**完全同形**，前缀缓存全程命中。
+现实会话的上下文里**只有「一次工具调用 + 一份结论」**，搜索过程、文件目录等噪音全部留在未来会话里。未来会话是**插件自持的镜像会话**：由插件直接经核心 Agent 工厂（`ctx.agents.create`）fork，不经原生 subagent 目录（无 `ctx.subagents`、无 subagentCatalog/descriptor），继承现实会话全部已完成轮次前缀——两边系统提示词与工具面**完全同形**，前缀缓存全程命中。
 
 ## 工作原理
 
@@ -42,12 +42,13 @@
 | `GET /tools[?sessionId=]` | 影子工具名清单（客户端 keyed 视图预注册；只增不减） |
 | `GET /calls?sessionId=` | `callId → 未来会话 id` 索引（结果块元数据缺失时的兜底） |
 | `GET /transcript?sessionId=&limit=` | 未来会话按步转录（**只允许读本插件登记过的未来会话**） |
+| `POST /answer` | 中继提问作答回传（未来会话 `ask_user_*` → 折叠框提问卡 → 用户点选后回传唤醒） |
 
 
 ## 安装
 
 ```powershell
-node <dsh>/lib/bin.js plugin --profile <profile> add D:\dsh\plugins\dsh-plugin-future-session
+node <dsh>/lib/bin.js plugin --profile <profile> add <本插件目录>
 ```
 
 重启 Desktop 客户端后生效（启动日志中不应出现 `skipping profile bundle "dsh-plugin-future-session"`）。
@@ -57,7 +58,8 @@ node <dsh>/lib/bin.js plugin --profile <profile> add D:\dsh\plugins\dsh-plugin-f
 **滑动开关（推荐）**：会话输入栏左下角有「未来」滑动开关——点一下即开启/关闭本会话的现实会话模式（悬停有说明气泡，无需输入任何指令）。
 
 ```
-/future on      # 等价指令：进入现实会话模式（工具全部由未来会话代执行）
+/future on      # 等价指令：进入现实会话模式（摘要返回：工具全部由未来会话代执行，只回蒸馏结论）
+/future raw     # 原文并入模式：未来会话的全部调用与结果原样塞回主会话（不写摘要）
 /future off     # 退出，工具恢复本地执行
 /future status  # 查看当前模式与累计未来会话
 ```
@@ -68,6 +70,7 @@ node <dsh>/lib/bin.js plugin --profile <profile> add D:\dsh\plugins\dsh-plugin-f
 |---|---|---|
 | `enabled` | `true` | 总开关 |
 | `protocolSection` | `true` | 是否注入共享协议提示段 |
+| `maxDepth` | `1` | 未来会话委派深度上限（防递归 fork） |
 
 ## 设计边界
 
@@ -75,6 +78,7 @@ node <dsh>/lib/bin.js plugin --profile <profile> add D:\dsh\plugins\dsh-plugin-f
 - **串行停摆**：现实会话在一次委派中整体等待，不产生并发 fork。
 - **转正不硬删**：`future_promote` 只封存并登记原现实会话，不做不可逆删除。
 - 持久化：`$DSH_HOME/dsh-plugin-future-session.json`（UTF-8 无 BOM，原子写），四张表——会话模式、未来会话登记、`callId → 未来会话` 映射、会话可见工具目录。
+- **策略继承**：fork 出的未来会话会把 approval 策略钉死为 `never`（delegation 语义）——现实会话在「ask」审批模式下开启本插件后，未来会话内的工具调用**不会再弹审批**，由核心策略层与沙箱约束兜底。
 
 ## 已知限制
 
@@ -82,13 +86,13 @@ node <dsh>/lib/bin.js plugin --profile <profile> add D:\dsh\plugins\dsh-plugin-f
 - 未来会话每步的 `future_return` 决策依赖模型自觉调用；未决策时回退使用其最终输出（仍符合「只回结论」语义）。
 - 折叠框数据面优先读结果块的 `presentationMeta`，读不到时回退 `GET /calls` 索引；两者都拿不到（例如插件重启前产生的历史调用）则该行不显示折叠框。
 - 折叠框按工具名注册 keyed 视图（`tool.call.toolview`）：该 slot 是 keyed 基数，若某工具的内置卡片与我们的视图同 key 并存，会出现「内置卡片 + 折叠框」上下两段——当前按可接受处理，必要时后续用 `priority` 精细收口。
-- `future_promote` 的「用户页面整页替换」尚未做（需要客户端会话切换 API 或自注册 View target）；当前实现为折叠框内提示 + 一键复制子会话 id，用户在左侧会话列表打开该未来会话继续接力。
+- `future_promote` 语义为「并入」（0.5.0 起）：未来会话的完整过程直接并入现实会话上下文，现实会话不封存、无需用户切换。
 - 收口与转正由**未来会话**自主决定；现实会话只是停摆等待返回值，不做二次判断。
 
 ## 开发自检
 
 ```powershell
-cd D:\dsh\plugins\dsh-plugin-future-session
+cd <本插件目录>
 npm run selfcheck
 ```
 
@@ -96,11 +100,12 @@ npm run selfcheck
 
 | 插件 | 链接 |
 |---|---|
-| dsh-notify | [GitHub repo](https://github.com/Pasumao/dsh-notify) · [npm](https://www.npmjs.com/package/dsh-notify) |
+| dsh-notify | [GitHub repo](https://github.com/Pasumao/dsh-plugin-notify) · [npm](https://www.npmjs.com/package/dsh-notify) |
 | dsh-plugin-image-tools | [GitHub repo](https://github.com/Pasumao/dsh-plugin-image-tools) · [npm](https://www.npmjs.com/package/dsh-plugin-image-tools) |
 | dsh-plugin-table-zoom | [GitHub repo](https://github.com/Pasumao/dsh-plugin-table-zoom) · [npm](https://www.npmjs.com/package/dsh-plugin-table-zoom) |
 | dsh-plugin-windows-guard | [GitHub repo](https://github.com/Pasumao/dsh-plugin-windows-guard) · [npm](https://www.npmjs.com/package/dsh-plugin-windows-guard) |
 | dsh-plugin-context-trim | [GitHub repo](https://github.com/Pasumao/dsh-plugin-context-trim) · [npm](https://www.npmjs.com/package/dsh-plugin-context-trim) |
+| dsh-plugin-dev-kb | [GitHub repo](https://github.com/Pasumao/dsh-plugin-dev-kb) · [npm](https://www.npmjs.com/package/dsh-plugin-dev-kb) |
 
 ## License
 

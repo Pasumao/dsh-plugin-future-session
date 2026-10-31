@@ -38,6 +38,18 @@
     "delegation"
   ],
   "license": "MIT",
+  "author": {
+    "name": "Pasumao",
+    "url": "https://github.com/Pasumao"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Pasumao/dsh-plugin-future-session.git"
+  },
+  "homepage": "https://github.com/Pasumao/dsh-plugin-future-session#readme",
+  "bugs": {
+    "url": "https://github.com/Pasumao/dsh-plugin-future-session/issues"
+  },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1"
   },
