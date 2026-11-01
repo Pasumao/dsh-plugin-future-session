@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.5.3 (2026-11-01)
+
+**第二轮全量核验（对 0.5.2 的「未来会话概述」数据面做对抗性验证：独立沙箱 + headless/web 双宿主 + GUI 浏览器自动化 + 26 项边界探针）抓出的 2 个实锤缺陷修复 + 1 项可观测性增强**。缺陷编号 H/I/J/K 沿用核验报告（本地沙箱工作区 `.verify-fs/notes/核验报告-0.5.2-概述全量.md`）。
+
+- 🔴 **future_peek 全面重写（缺陷 H）**：peek 是全插件最后一个仍走 `ctx.sessionQuery.listEvents` 的读取点——那是 FTS 搜索索引的**元数据投影**（只有 `{sessionId,seq,type,time,surface}`，没有 data 载荷），实弹返回 2915 字符的 `✎ 消息 {"sessionId":…,"seq":8,…}` 纯元数据垃圾；且 76 事件未经 `ownEventsOf` 切割（混入父会话全部旧轮）、无登记校验（peek 父会话自身/任意会话照样返回，与 /transcript 的 404 防护不一致）。现与 /transcript **完全同管线**：① `store.getChild` 登记校验（未登记 → `found:false`，与 404 unknown-future-session 对齐）→ ② 活 agent 内存快照 → ③ 落盘文件（多帧 zstd，带 payload）→ ④ `ownEventsOf` 切割（只摘要 fork 之后新增部分）→ ⑤ 共用 `summarizeEvents` 摘要 + 新增 `stepsToText` 渲染按步文本（总量 24k 保尾，最近步骤最相关）；元数据投影降为最后兜底并在摘要中显式标注「仅有元数据投影」。`summarizeEvents`/`clip` 随之从 index.js 移居 future.js（纯事件处理函数归位；index.js 保持再导出，selfcheck 导入路径不变），顺带消除 tools.js→index.js 的潜在循环依赖。
+- 🟠 **fallback/abort 出口补落账 settledAt（缺陷 I）**：`store.settleChild` 此前只在两个决策工具里调用——回退收口（未调用 future_return/future_promote）与 abort 后 `children.settledAt` 永远 null → `/transcript` 的 `running: settledAt === null` 恒真 → 该会话折叠框**永久「运行中」** + 客户端 1.2s 无限轮询（每次打开会话必现；R6 fallback 实弹存证）。新增 `store.settleChildIfUnsettled()`（仅在未落账时补 `decision:null` + settledAt，**不覆盖**决策工具已落的 return/promote），`delegate()` 在 `settle()` 返回后统一补账——aborted 在 throw 之前、`settle()` 自身抛错也在重抛前补账，原文并入（raw）出口同样覆盖。**启动补账收尾**：未来会话是进程内镜像，宿主重启后不可能仍在运行——启动时把历史遗留的 `settledAt=null` 记录一次性矫正（`settleAllUnsettled`），0.5.3 前 fallback/abort 的旧会话不再永久轮询。
+- 🟡 **callId 兜底可观测（观察项 K）**：客户端折叠框按 callId 查 `/calls` 的重试链在命中/放弃时 `console.debug` 打点（0.5.2 两次 GUI 实弹一次命中一次空串，无法定位；结果落块后 presentationMeta 直读不受影响）。
+- 观察项 **J**（web 宿主 followup 时核心把 runtime-context/time-context 内联进委派消息 → 折叠框「用户」步带一截上下文噪音）按报告建议**接受现状**：数据正确、纯展示噪音，噪音源自核心注入行为，摘要层启发式截断有误伤风险、收益低。
+- **selfcheck 增补**：peek 内容质量断言（含工具名/结果文本/按步渲染文本）、ownEventsOf 切割断言（父会话旧轮 R1-MARKER 不入摘要）、越权断言（父会话自身/任意未登记 id → `found:false`）、主路径不触达 sessionQuery 断言；`stepsToText` 四类步渲染 + 保尾截断单测；delegate 四路径 settledAt 断言（fallback 补账 / return·promote 既有决策不被覆盖 / aborted 在 throw 前落账）；`settleChildIfUnsettled` 契约（未登记 no-op / 已落账不动）。
+
+## 0.5.2 (2026-11-01)
+
+**dsh 0.2.1-rc.3+ 适配专项：修复沙箱全链路核验（2026-10-31~11-01，独立 DSH_HOME 沙箱 + headless/web 双宿主 + GUI 目检）抓出的 5 个实锤缺陷与 2 项展示/交互缺陷**。根因：0.2.1-rc.3 核心收紧了工具 output 校验与 surface 事件契约，并新增轮次级 end-seed 标记（插件 0.5.1 定稿于 0.2.1-rc.2 时代）。
+
+- 🔴 **ask 中继工具补 output 声明**（`createAskRelays`）：0.2.1-rc.3 起工具注册强制 `output { schema, render, presentationMeta? }`，缺失即注册被拒（`must declare output`）→ 中继整体失效，退回 0.4.x 的禁用行为——且禁用回退对 agent 作用域工具也失败（restrict 只认全局工具名）。现为两个中继补 `output.schema`（answers/note）与 render。**配套三级降级链**：中继注册失败 → restrict（全局工具才可用）→ per-agent **guard 拒执**（0.2.x 正口），子会话调用真卡时拿到明确拒绝理由而不是永久卡死；注册逐个进行，一个失败不拖累另一个。
+- 🔴 **影子 output schema 枚举补 `'raw'`**：原文并入（reality-raw）路径返回 `mode:'raw'`，0.2.1-rc.3 起 harness 严格校验 output schema——缺枚举值导致**每次调用必报** `invalid output`，整个模式不可用。
+- 🟠 **end-seed 切割取最后一个标记（新增 `ownEventsOf`，4 处统一收口）**：0.2.1-rc.3 起核心在**每次轮次切换**都追加 `session/end-seed` 且随 seed 复放进子会话日志——0.5.1 用 `findIndex`（第一个）切割，第 3 轮起折叠框转录与 promote 并入摘要**混入父会话已完成轮次**（实测并入了 step-A/step-B 等旧内容）。`ownEventsOf(events)` 取 `findLastIndex`（真边界），替换 mergeDigest / /transcript / future_fetch 兜底 / settle 回退提取共 4 处。
+- 🟠 **fallback 过期文本修复**：`lastAssistantText` 回退提取此前扫全量事件——子会话 concludeTurn 收口（自身轮无 assistant 正文）时命中 seed 前缀里父会话上一轮的最终回答（实测连续两次返回上轮旧文本）。现 settle 提取前经 `ownEventsOf` 切割。
+- 🟡 **promote 通告撤掉 `system/message` 注入**：0.2.1-rc.3 起 `system/message` 是 surface-eligible 事件，append 强制要求 surfaceOp 标记（旧调用落盘失败）；且带 surfaceOp 的 system 消息会进入**模型可见面**并与核心系统提示词系列管理冲突——正确取舍是不注入模型上下文。「已并入」事实由三处既有通道承载：工具结果文本（模型）、客户端折叠框「已并入」标签 + foot 说明（用户）、store promote 落账（持久）。
+- 🟡 **折叠框运行期渲染修复（ask 提问卡 GUI 可达）**：0.2.1 起核心 keyed toolview 的 owner **不带会话身份**（只有 callId/toolName/phase/block/cwd/home），折叠框组件在结果落块前拿不到 childSessionId → 整个运行期 return null → 「运行中自动展开+轮询」失效、ask 提问卡无处渲染（实测只能 POST /answer 救场）。修复：`GET /calls` 允许省略 sessionId 返回**全部映射并集**（callId 全局唯一，新增 `store.allCalls()`，保尾 2000 条），客户端无 sessionId 时按 callId 全局匹配；委派开始时 linkCall 先登记 → 运行期即可命中；注册竞态（行挂载早于 linkCall）由 1.2s×30 次有界重试兜住。收口后折叠框随核心 turn-process 折叠（属核心布局设计，工作过程视图仍常显）。
+- 🟡 **折叠框展示卫生**：①宿主每轮注入的 runtime-context / skill-catalog / time-context 等上下文拼接消息不再渲染成「用户」步（只认 `source.kind` 缺失或 `'user'`）；②assistant 步只取 text 正文块（与 lastAssistantText 同规则）——tool-call 块此前被 JSON 序列化成乱码文本；③框头「结论摘要」改取最后一条**非空 result/assistant 文本**（此前取到的常是那条乱码 JSON 或空白）。
+- **subagent 影子降级链升级 + degraded 暴露**：影子与同名工具冲突时 register→restrict→guard 三级降级；degraded 名单按会话跟踪（`degradedToolsOf`），在 `/mode` GET/PUT 响应与 `/future on` / `/future status` 输出中明示「哪些工具会绕过委派直接本地执行」。
+- **selfcheck 增补 0.2.1-rc.3+ 回归**（此前用例全部单 end-seed 标记，恰好遮住缺陷 C/D）：多 end-seed 切割断言、output 枚举与 verbatim 一致性断言、ask 中继 output 声明断言、三级降级链（guard 成功/degraded 落名）断言、展示卫生断言、calls 并集断言。
+- 附注：中继作答回显 CJK 乱码（沙箱实测记录）复核定性为**测试链路问题**——Git Bash curl 在 Windows 控制台以 GBK 发送 CJK 参数所致；插件 readBody 明确 UTF-8（`Buffer.toString('utf8')`），浏览器 fetch 路径恒为 UTF-8，GUI 作答不受影响。
+
 ## 0.5.1 (2026-10-12)
 
 **五项迭代（基于首轮实测反馈）**：

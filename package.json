@@ -1,7 +1,7 @@
 {
   "name": "dsh-plugin-future-session",
   "description": "现实/未来会话：把 dsh 会话拆成现实会话与未来会话——现实会话的任何工具调用都不会本地执行，而是停摆等待，由继承其全部上下文的 fork 子会话（未来会话）代劳并自主决定只回结论（future_return）还是把过程并入现实会话（future_promote，0.5.0 起不再封存/切换）。现实会话上下文只保留「一次调用 + 一份结论」，前缀缓存全程命中。Reality/future session split for DeepSeek Harness (dsh): every tool call in the reality session transparently forks a context-inheriting future session; token-heavy tool work never pollutes the reality context. Zero dependencies, zero build.",
-  "version": "0.5.1",
+  "version": "0.5.3",
   "type": "module",
   "main": "./lib/index.js",
   "exports": {

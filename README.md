@@ -18,9 +18,9 @@
 3. 未来会话继承现实会话全部已完成上下文（缓存命中），自由使用真工具完成整段工作。
 4. **由未来会话自主决定**怎么收口：
    - 中间过程没用（一堆文件目录、噪音输出）→ 调用 `future_return(summary)`：结论成为现实会话那次工具调用的返回值（带 `[future-session]` 标记），未来会话封存；
-   - 过程信息对后续有用 → 调用 `future_promote(report)`：未来会话转正为现实会话，原现实会话封存（转正报告登记在案，会话可在 Desktop 会话列表打开）。
+   - 过程信息对后续有用 → 调用 `future_promote(report)`（0.5.0 起 promote=merge）：未来会话的完整过程（叙述+调用+结果）**并入**现实会话上下文，现实会话不封存、原地继续推进。
 5. **身份判定不靠提示词分叉**（分叉会砸掉缓存）：现实与未来看到同一份系统提示词协议段、同一套工具名。模型靠工具返回内容自检——返回原始数据 → 自己在未来会话；返回带 `[future-session]` 标记的结论 → 自己在现实会话。
-6. 保底：现实会话可调用 `future_peek(sessionId)` 查看某个未来会话内部的按步摘要（提示词明确「尽量别用」）。
+6. 保底：现实会话可调用 `future_peek(sessionId)` 查看某个未来会话内部的按步摘要（提示词明确「尽量别用」）。与折叠框 `/transcript` 同一数据管线（登记校验 → 活快照/落盘 → 只摘要 fork 之后的新增部分），**只允许查看本插件登记过的未来会话**。
 
 未来会话是插件自持的持久化镜像会话：不进任何原生目录，由插件登记追踪；会话本体可在 Desktop 会话列表打开（`parentSession` 头标记其来源）。
 
@@ -28,11 +28,10 @@
 
 用户界面**永远停在现实会话**，未来会话的中间过程作为**工具行内的折叠框**呈现：
 
-- 影子工具的输出带 `output.presentationMeta`，把 `{ futureSession: { childSessionId, mode, toolName } }` 作为**可回放展示元数据**随工具结果持久化，客户端从结果块的 `meta` 读得到；
+- 影子工具的输出带 `output.presentationMeta`，把 `{ futureSession: { childSessionId, mode, toolName } }` 作为**可回放展示元数据**随工具结果持久化，客户端从结果块的 `meta` 读得到；结果落块前（运行期）则按 callId 查 `GET /calls` 兜底索引（0.5.2 起省略 sessionId 返回全局并集——核心 keyed toolview 的 owner 不带会话身份，这是折叠框**在运行期出现**的前提，0.5.1 及之前整个运行期不渲染）；
 - 客户端按工具名把同一个 ToolRow 注册进 ui-tool 的 keyed slot `tool.call.toolview`（未登记的工具继续用内置卡片）；
-- 运行中：折叠框自动展开，每秒轮询 `GET /transcript` 显示未来会话的按步转录（用户/助手文本、工具调用与结果摘要）；
-- 收口后：自动收起成一行（`已回结论` / `已转正` / `已结束` 标签 + 最后一段结论摘要），随时可手动展开，可一键复制子会话 id；
-- `future_promote` 时折叠框提示「已转正：可在左侧会话列表打开该未来会话继续接力（本会话已封存）」。
+- 运行中：折叠框自动展开，每 1.2s 轮询 `GET /transcript` 显示未来会话的按步转录（用户/助手文本、工具调用与结果摘要）；中继提问（`ask_user_*`）以提问卡形式渲染在折叠框里，用户点选作答后原地唤醒未来会话；
+- 收口后：自动收起（`已回结论` / `已并入` / `已收口` 标签 + 最后一段 result/assistant 摘要），随时可手动展开，可一键复制子会话 id；收口后折叠框随核心的 turn-process 分组折叠（需展开工具行所在的过程组查看），运行期的实时过程另由工作过程视图（transcriptView）常显兜底。
 
 ### 宿主路由（客户端数据面，全部 loopback-only）
 
@@ -40,7 +39,7 @@
 |---|---|
 | `GET /mode?sessionId=` · `PUT /mode` | 模式读取 / 切换（滑动开关） |
 | `GET /tools[?sessionId=]` | 影子工具名清单（客户端 keyed 视图预注册；只增不减） |
-| `GET /calls?sessionId=` | `callId → 未来会话 id` 索引（结果块元数据缺失时的兜底） |
+| `GET /calls[?sessionId=]` | `callId → 未来会话 id` 索引（结果块元数据缺失时的兜底；省略 sessionId 返回全局并集，保尾 2000 条） |
 | `GET /transcript?sessionId=&limit=` | 未来会话按步转录（**只允许读本插件登记过的未来会话**） |
 | `POST /answer` | 中继提问作答回传（未来会话 `ask_user_*` → 折叠框提问卡 → 用户点选后回传唤醒） |
 
@@ -84,7 +83,9 @@ node <dsh>/lib/bin.js plugin --profile <profile> add <本插件目录>
 
 - 影子注册经 agent 作用域 fiber 微任务落地，理论上存在首个请求抢跑窗口（与 dsh-plugin-context-trim 相同边界，实践中先于首个 pre-step 完成）。
 - 未来会话每步的 `future_return` 决策依赖模型自觉调用；未决策时回退使用其最终输出（仍符合「只回结论」语义）。
-- 折叠框数据面优先读结果块的 `presentationMeta`，读不到时回退 `GET /calls` 索引；两者都拿不到（例如插件重启前产生的历史调用）则该行不显示折叠框。
+- 折叠框数据面优先读结果块的 `presentationMeta`，运行期与读不到时按 callId 查 `GET /calls` 索引；两者都拿不到（例如插件重启前产生且无映射的历史调用）则该行不显示折叠框。
+- 收口后的折叠框位于核心 turn-process 过程组内（工具行收进「已完成，用时…」折叠区是 0.2.1+ 核心的布局设计）：需两级展开查看；运行期可见性由运行中折叠框与工作过程视图（transcriptView）保障。
+- 影子与同名工具冲突时按 register→restrict→guard 三级降级；guard 也失败的进入 degraded 名单（`/future status` 与 `/mode` 会明示），这些工具会绕过委派直接本地执行。
 - 折叠框按工具名注册 keyed 视图（`tool.call.toolview`）：该 slot 是 keyed 基数，若某工具的内置卡片与我们的视图同 key 并存，会出现「内置卡片 + 折叠框」上下两段——当前按可接受处理，必要时后续用 `priority` 精细收口。
 - `future_promote` 语义为「并入」（0.5.0 起）：未来会话的完整过程直接并入现实会话上下文，现实会话不封存、无需用户切换。
 - 收口与转正由**未来会话**自主决定；现实会话只是停摆等待返回值，不做二次判断。

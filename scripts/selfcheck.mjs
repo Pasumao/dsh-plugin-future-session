@@ -10,7 +10,8 @@
  *     不遮蔽、非 reality 会话不安装；delegate() 的 return / promote / fallback /
  *     aborted 四路径
  *  5. 决策工具：future_return 在子会话记录决策并 concludeTurn、顶层 noop；
- *     future_peek 读取 sessionQuery 摘要；协议段包含双向身份判定说明
+ *     future_peek 走 /transcript 同管线（登记校验 → 活快照 → 切割 → 共用摘要器，
+ *     0.5.3 缺陷 H：不再读 sessionQuery 元数据投影）；协议段包含双向身份判定说明
  */
 
 import { readFile, rm, mkdir } from 'node:fs/promises'
@@ -34,7 +35,9 @@ import {
   createToolDefinitions,
   PROTOCOL_SECTION,
   summarizeEvents,
+  stepsToText,
   mergeDigest,
+  ownEventsOf,
   createAskRelays
 } from '../lib/index.js'
 
@@ -91,13 +94,32 @@ async function test2() {
     assert.equal(store.getChild('c1').decision, 'return', '决策落账 return')
     assert.equal(store.getChild('c2').decision, 'promote', '决策落账 promote')
 
+    // 0.5.3 缺陷 I：收口补账——未落账出口（fallback/abort）补 settledAt，
+    // 已落账的 return/promote 不被覆盖。
+    const recC1 = store.settleChildIfUnsettled('c1')
+    assert.equal(recC1.decision, 'return', '补账不覆盖既有 return 决策')
+    assert.ok(recC1.settledAt !== null, '已落账记录 settledAt 保持')
+    store.registerChild('c3', 's1', 'grep')
+    const recC3 = store.settleChildIfUnsettled('c3')
+    assert.equal(recC3.decision, null, '未落账出口补账 decision=null（fallback 形态）')
+    assert.ok(recC3.settledAt !== null, '补账盖上 settledAt（running 恒真修复）')
+    assert.equal(store.settleChildIfUnsettled('c-none'), null, '未登记会话补账安全 no-op')
+
+    // 0.5.3 启动补账：宿主重启后不存在仍在运行的子会话，历史遗留 settledAt=null
+    // 一次性矫正（0.5.3 前 fallback/abort 遗留不再永久「运行中」轮询）。
+    store.registerChild('c4', 's1', 'read')
+    assert.equal(store.settleAllUnsettled(), 1, 'settleAllUnsettled 只补未落账的（c4）')
+    assert.ok(store.getChild('c4').settledAt !== null, '启动补账盖上 settledAt')
+    assert.equal(store.settleAllUnsettled(), 0, '全部已落账时补账数为 0')
+
     await new Promise((resolve) => setTimeout(resolve, 150))
     const store2 = new ModeStore(file)
     assert.ok(store2.isReality('s1'), '持久化回环：模式保留')
     assert.equal(store2.getChild('c2').toolName, 'pwsh', '持久化回环：子会话登记保留')
 
     store2.pruneSessions(['s1'])
-    assert.equal(store2.childrenOf('s1').length, 2, '父会话存活的子登记不清理')
+    assert.equal(store2.childrenOf('s1').length, 4, '父会话存活的子登记不清理（c1/c2/c3/c4）')
+    assert.equal(store2.getChild('c3').settledAt !== null, true, '补账 settledAt 持久化回环')
     store2.pruneSessions(['other'])
     assert.equal(store2.childrenOf('s1').length, 0, '父会话消失后子登记被清理')
     pass('模式读写 / 决策落账 / 孤儿清理 / 持久化回环全部通过')
@@ -337,23 +359,35 @@ async function test4() {
       buildDelegationPrompt('pwsh', '{"command":"dir"}').includes('范围'),
       'buildDelegationPrompt 含范围约束（0.4.12：防未来会话越界代做整个任务）'
     )
+    // 0.5.3 缺陷 I：fallback 出口必须补落账 settledAt（否则 /transcript running 恒真，
+    // 折叠框永久「运行中」+ 1.2s 无限轮询；R6 实弹存证）。
+    assert.ok(store.getChild('child-1').settledAt !== null, 'fallback 出口补落账 settledAt（缺陷 I）')
+    assert.equal(store.getChild('child-1').decision, null, 'fallback 出口 decision=null')
 
+    // 生产时序：决策工具在子会话内先 store.settleChild 再由 delegate 读 decisions——
+    // 这里照工具行为补落账，验证 delegate 的收口补账不覆盖既有决策。
     decisions.set('child-1', { type: 'return', payload: '找到了 X 文件', at: '' })
+    store.settleChild('child-1', 'return')
     const v2 = await applier.delegate({ toolName: 'pwsh', args: {}, exec: fakeExec })
     assert.equal(v2.mode, 'return', 'future_return 决策 → return 路径')
     assert.ok(v2.summary.includes('找到了 X 文件'), 'return 路径透传结论')
     assert.ok(store.getChild('child-1').toolName === 'pwsh', '子会话登记包含工具名')
+    assert.equal(store.getChild('child-1').decision, 'return', 'return 出口后既有决策不被补账覆盖')
 
     decisions.set('child-1', { type: 'promote', payload: '完整报告', at: '' })
+    store.settleChild('child-1', 'promote')
     const v3 = await applier.delegate({ toolName: 'pwsh', args: {}, exec: fakeExec })
     assert.equal(v3.mode, 'promote', 'future_promote 决策 → promote 路径')
+    assert.equal(store.getChild('child-1').decision, 'promote', 'promote 出口后既有决策不被补账覆盖')
 
     const applierAbort = new ShadowApplier(null, store, new Map(), makeFakeRuntime({ aborted: true, id: 'child-2' }))
     await assert.rejects(
       () => applierAbort.delegate({ toolName: 'pwsh', args: {}, exec: fakeExec }),
       /取消/, 'aborted → 抛错（isError）'
     )
-    pass('影子同形 / OWN_TOOLS 排除 / delegate return·promote·fallback·aborted 四路径全部通过')
+    // 0.5.3 缺陷 I：aborted 抛错之前必须已补账（throw 前落账）。
+    assert.ok(store.getChild('child-2').settledAt !== null, 'aborted 出口在 throw 前补落账 settledAt（缺陷 I）')
+    pass('影子同形 / OWN_TOOLS 排除 / delegate return·promote·fallback·aborted 四路径（含 settledAt 补账）全部通过')
   } catch (error) {
     fail(`ShadowApplier：${error.message}`)
   }
@@ -393,10 +427,55 @@ async function test5() {
     // 空参数抛错。
     await assert.rejects(() => defs.futureReturn.execute({ summary: '' }, childExec), /summary/, '空 summary 拒绝')
 
-    // future_peek。
-    const r4 = await defs.futurePeek.execute({ sessionId: 'child-9' }, topExec)
-    assert.equal(r4.found, true, 'peek 找到会话')
-    assert.ok(r4.summary.includes('web_search') && r4.summary.includes('[future-session]'), 'peek 摘要含工具名与标记')
+    // future_peek（0.5.3 缺陷 H 回归：与 /transcript 同管线——登记校验 → 活快照 →
+    // ownEventsOf 切割 → 共用 summarizeEvents/stepsToText；不再读 sessionQuery
+    // 元数据投影，返回内容必须有真实载荷）。
+    store.registerChild('child-9', 'top-9', 'pwsh')
+    const peekEvents = [
+      // seed 继承的父会话旧轮（随 end-seed 复放进子会话日志）——不得出现在摘要里。
+      { type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'R1-MARKER 父会话旧轮' }] } },
+      { type: 'session/end-seed', data: { inherited: true } },
+      // 子会话自身事件。
+      { type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'text', text: '现实会话停摆，请代为执行' }] } },
+      { type: 'tool/call', data: { name: 'web_search', arguments: JSON.stringify({ queries: ['a'] }) } },
+      { type: 'tool/result', data: { message: { toolCallId: 't9', content: [{ type: 'text', text: '结果…' }] } } }
+    ]
+    let listEventsCalled = false
+    const peekCtx = {
+      agents: { get: (id) => (id === 'child-9' ? { session: { snapshotEvents: () => peekEvents } } : undefined) },
+      sessionQuery: { listEvents: async () => { listEventsCalled = true; return [] } }
+    }
+    const peekDefs = createToolDefinitions({ store, decisions, ctx: peekCtx })
+    const r4 = await peekDefs.futurePeek.execute({ sessionId: 'child-9' }, topExec)
+    assert.equal(r4.found, true, 'peek 找到已登记的未来会话')
+    assert.ok(r4.summary.includes('[future-session]'), 'peek 摘要带标记')
+    assert.ok(r4.summary.includes('web_search'), 'peek 摘要含工具名（内容质量断言，防元数据垃圾回归）')
+    assert.ok(r4.summary.includes('结果…'), 'peek 摘要含结果文本（真实载荷）')
+    assert.ok(r4.summary.includes('▶ 工具调用'), 'peek 摘要为按步渲染文本')
+    assert.ok(!r4.summary.includes('R1-MARKER'), 'peek 摘要经 ownEventsOf 切割，父会话旧轮不入（缺陷 H）')
+    assert.ok(!r4.summary.includes('"seq"') && !r4.summary.includes('✎ 消息'), 'peek 不再输出 FTS 元数据投影垃圾（缺陷 H）')
+    assert.equal(listEventsCalled, false, 'peek 主路径不触达 sessionQuery（活快照命中）')
+    // 登记校验：父会话自身 / 任意未登记 id → found:false（与 /transcript 404 对齐）。
+    const r5 = await peekDefs.futurePeek.execute({ sessionId: 'top-9' }, topExec)
+    assert.equal(r5.found, false, 'peek 父会话自身 → 拒绝（越权防护，与 /transcript 对齐）')
+    assert.ok(r5.summary.includes('不是本插件登记的未来会话'), '拒绝说明指向「未登记」')
+    const r6 = await peekDefs.futurePeek.execute({ sessionId: 'session-random' }, topExec)
+    assert.equal(r6.found, false, 'peek 任意未登记会话 → 拒绝')
+
+    // stepsToText：四类步渲染 + 总量保尾截断（peek 文本面）。
+    const peekLines = stepsToText([
+      { kind: 'user', text: '委派请求' },
+      { kind: 'tool', name: 'pwsh', desc: '列目录', text: '{"command":"dir"}' },
+      { kind: 'result', ok: false, text: '炸了' }
+    ])
+    assert.ok(peekLines.includes('✎ 用户：委派请求'), 'stepsToText 渲染用户步')
+    assert.ok(peekLines.includes('▶ 工具调用 pwsh（列目录）'), 'stepsToText 渲染工具步（含描述）')
+    assert.ok(peekLines.includes('◀ 结果（失败）：炸了'), 'stepsToText 渲染结果步（含失败标记）')
+    const longSteps = Array.from({ length: 200 }, (_, i) => ({ kind: 'assistant', text: `step-${i}-${'x'.repeat(200)}` }))
+    const tailKept = stepsToText(longSteps, { maxTotal: 1000 })
+    assert.ok(tailKept.startsWith('…[future-session 摘要截断'), 'stepsToText 超限保尾截断')
+    assert.ok(tailKept.includes('step-199'), '保尾保留最近步骤')
+    assert.ok(!tailKept.includes('step-0-'), '保尾丢弃最早步骤')
 
     // 协议段：双向判定说明齐备。
     assert.ok(PROTOCOL_SECTION.includes('[future-session]'), '协议段含返回标记说明')
@@ -671,7 +750,141 @@ async function test8() {
   }
 }
 
-const tests = [test1, test2, test3, test3b, test4, test5, test6, test7, test8]
+async function test9() {
+  console.log('[9] 0.2.1-rc.3+ 回归：多 end-seed 切割 / raw 枚举 / ask 中继 output / 降级链 / 展示卫生 / calls 并集')
+  try {
+    // ---- §五.1 多 end-seed 切割：0.2.1-rc.3 起轮次切换标记随 seed 复放进子会话
+    // 日志，真边界 = 最后一个标记（0.5.1 用 findIndex 命中第一个，折叠框转录与
+    // promote 摘要混入父会话已完成轮次——2026-10-31 沙箱实锤）。
+    const polluted = [
+      { type: 'user/message', data: { content: [{ type: 'text', text: '父会话第 1 轮' }] } },
+      { type: 'session/end-seed', data: {} }, // 父会话第 1 轮切换标记（随 seed 复放进来）
+      { type: 'assistant/message', data: { content: [{ type: 'text', text: 'step-A 父会话旧轮内容' }] } },
+      { type: 'session/end-seed', data: {} }, // 父会话第 2 轮切换标记
+      { type: 'assistant/message', data: { content: [{ type: 'text', text: 'step-B 父会话旧轮内容' }] } },
+      { type: 'session/end-seed', data: { inherited: true } }, // 构造器追加的真边界
+      { type: 'assistant/message', data: { content: [{ type: 'text', text: '子会话自己的叙述' }] } },
+      { type: 'tool/call', data: { name: 'pwsh', callId: 'c9', arguments: JSON.stringify({ description: 'dir' }) } },
+      { type: 'tool/result', data: { message: { toolCallId: 'c9', content: [{ type: 'text', text: 'a.exe' }] } } }
+    ]
+    const own = ownEventsOf(polluted)
+    assert.equal(own.length, 3, 'ownEventsOf 取最后一个 end-seed 之后（真边界）')
+    assert.ok(!own.some((e) => e?.type === 'session/end-seed'), '自有段不含切割标记')
+    const digest9 = mergeDigest(polluted)
+    assert.ok(digest9.includes('子会话自己的叙述') && digest9.includes('pwsh（dir）') && digest9.includes('a.exe'), 'mergeDigest 只含子会话自身过程')
+    assert.ok(!digest9.includes('step-A') && !digest9.includes('step-B') && !digest9.includes('父会话'), 'mergeDigest 不混入父会话旧轮（0.5.1 实锤缺陷 C）')
+    // 缺陷 D 同源回归：子会话自身轮无 assistant 正文 → 回退必须为空文本，
+    // 而不是命中 seed 前缀里父会话上一轮的最终回答（fallback-check-555 实录）。
+    const staleSeed = [
+      { type: 'assistant/message', data: { content: [{ type: 'text', text: 'fallback-check-555' }] } },
+      { type: 'session/end-seed', data: { inherited: true } },
+      { type: 'tool/call', data: { name: 'pwsh', callId: 'cd', arguments: '{}' } },
+      { type: 'tool/result', data: { message: { toolCallId: 'cd', content: [{ type: 'text', text: 'ok' }] } } }
+    ]
+    assert.equal(lastAssistantText(ownEventsOf(staleSeed)), '', '自身轮无 assistant 正文 → 回退为空文本（不取父会话旧回答）')
+    assert.equal(ownEventsOf([]).length, 0, '空日志 → 空自有段')
+    assert.equal(ownEventsOf([{ type: 'tool/result' }]).length, 1, '无标记 → 全量自有')
+
+    // ---- §五.2 output schema 枚举一致性（0.5.1 缺陷 B）：verbatim 路径返回
+    // mode:'raw'，影子 output 枚举缺 'raw' → reality-raw 每次调用必报 invalid output。
+    const store9 = new ModeStore(join(tmpdir(), `store9-${Date.now()}-${Math.random()}.json`))
+    const applier9 = new ShadowApplier(null, store9, new Map(), null)
+    const shadow9 = applier9.buildShadow({ name: 'pwsh', description: 'd', parameters: { type: 'object', properties: {} } })
+    assert.deepEqual(
+      shadow9.output.schema.properties.mode.enum,
+      ['return', 'promote', 'fallback', 'raw'],
+      '影子 output mode 枚举含 raw（verbatim 路径合法性）'
+    )
+
+    // ---- §五.3 ask 中继 output 声明（0.5.1 缺陷 A）：0.2.1-rc.3 注册强制
+    // output { schema, render }，缺失 → 注册被拒 → 禁用回退也失败（agent 作用域）。
+    const rt9 = new FutureSessionRuntime({ agentLoop: {} }, store9, new Map())
+    for (const relay of createAskRelays(rt9)) {
+      assert.equal(typeof relay.output?.render, 'function', `中继 ${relay.name} 声明 output.render`)
+      assert.equal(relay.output?.schema?.type, 'object', `中继 ${relay.name} 声明 output.schema`)
+      assert.ok(Array.isArray(relay.output?.schema?.required) && relay.output.schema.required.includes('answers'), `中继 ${relay.name} schema 必填 answers`)
+    }
+
+    // ---- 降级链 register→restrict→guard（0.5.1 附属：subagent 影子 restrict 也
+    // 失败，agent 作用域工具只能 guard 拒执；degraded 名单按会话跟踪并对外暴露）。
+    const schemas9 = [
+      { name: 'subagent', description: '原生委派', parameters: { type: 'object', properties: {} } },
+      { name: 'pwsh', description: '执行命令', parameters: { type: 'object', properties: {} } }
+    ]
+    const guards = []
+    const view9 = {
+      tools: {
+        schemas: () => schemas9,
+        register: (d) => { if (d.name === 'subagent') throw new Error('tool "subagent" is already registered in this scope'); registered9.push(d) },
+        restrict: (filter) => { throw new Error(`tools.restrict() names unknown global tool "subagent"` ) },
+        guard: (g) => { guards.push(g) }
+      }
+    }
+    const registered9 = []
+    const applier9b = new ShadowApplier({ tools: { schemas: () => schemas9 } }, store9, new Map(), makeFakeRuntime())
+    const agent9 = { id: 'a9', session: { id: 'top-9', header: {} }, ctx: { inject: (s, cb) => { cb(view9); return { dispose: () => {} } } } }
+    store9.setMode('top-9', 'reality')
+    const applied9 = applier9b.applyToAgent(agent9, 'selfcheck-guard')
+    assert.equal(guards.length, 1, 'restrict 不可用 → 退到 per-agent guard 拒执')
+    assert.equal(applied9.degraded.length, 0, 'guard 成功 ≠ degraded（三级降级链兜住）')
+    const guardReason = guards[0]({ name: 'subagent' })
+    assert.ok(typeof guardReason === 'string' && guardReason.includes('subagent'), 'guard 对目标工具返回拒绝理由')
+    assert.equal(guards[0]({ name: 'pwsh' }), undefined, 'guard 对其他工具放行')
+    // guard 也不可用 → degraded 落名并对外暴露。
+    const view9b = {
+      tools: {
+        schemas: () => schemas9,
+        register: (d) => { if (d.name === 'subagent') throw new Error('tool "subagent" is already registered in this scope'); registered9b.push(d) },
+        restrict: () => { throw new Error('unknown global tool') },
+        guard: () => { throw new Error('guard unavailable') }
+      }
+    }
+    const registered9b = []
+    const applier9c = new ShadowApplier({ tools: { schemas: () => schemas9 } }, store9, new Map(), makeFakeRuntime())
+    const agent9b = { id: 'a9b', session: { id: 'top-9', header: {} }, ctx: { inject: (s, cb) => { cb(view9b); return { dispose: () => {} } } } }
+    const applied9b = applier9c.applyToAgent(agent9b, 'selfcheck-degraded')
+    assert.deepEqual(applied9b.degraded, ['subagent'], 'guard 也不可用 → applied.degraded 落名')
+    assert.deepEqual(applier9c.degradedToolsOf('top-9'), ['subagent'], 'degradedToolsOf 按会话暴露（/mode 与 /future status 用）')
+
+    // ---- 展示卫生（0.5.1 缺陷 F）：①宿主上下文拼接消息不入「用户」步
+    // ②assistant 只取 text 正文块（tool-call 块不再 JSON 序列化成乱码）。
+    const noisy = [
+      { type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'text', text: '真用户请求' }] } },
+      { type: 'user/message', data: { source: { kind: 'runtime-context' }, content: [{ type: 'text', text: 'Current runtime context…' }] } },
+      { type: 'user/message', data: { source: { kind: 'skill-catalog' }, content: [{ type: 'text', text: '<system-reminder>skills…' }] } },
+      { type: 'user/message', data: { source: { kind: 'time-context' }, content: [{ type: 'text', text: '2026-10-31T…' }] } },
+      { type: 'assistant/message', data: { content: [{ type: 'reasoning', text: '思考' }, { type: 'tool-call', id: 't1', name: 'pwsh', arguments: '{"command":"dir"}' }, { type: 'text', text: '我来查一下' }] } }
+    ]
+    const steps9 = summarizeEvents(noisy, 500)
+    assert.deepEqual(steps9.map((s) => s.kind), ['user', 'assistant'], '上下文拼接消息（runtime-context/skill-catalog/time-context）不渲染成用户步')
+    assert.ok(!steps9[1].text.includes('tool-call') && !steps9[1].text.includes('command'), 'assistant 步不含 tool-call 块序列化噪音')
+    assert.ok(steps9[1].text.includes('我来查一下'), 'assistant 步取 text 正文')
+
+    // ---- /calls 并集（0.5.1 缺陷 G 数据面）：owner 无会话身份 → 按 callId 全局匹配。
+    const store9b = new ModeStore(join(tmpdir(), `store9b-${Date.now()}-${Math.random()}.json`))
+    store9b.registerChild('child-p', 'top-p', 'pwsh')
+    store9b.registerChild('child-q', 'top-q', 'glob')
+    store9b.linkCall('call-p', 'top-p', 'pwsh', 'child-p')
+    store9b.linkCall('call-q', 'top-q', 'glob', 'child-q')
+    const union = store9b.allCalls()
+    assert.equal(union.length, 2, 'allCalls 返回跨会话并集')
+    assert.ok(union.every((c) => typeof c.callId === 'string' && typeof c.childSessionId === 'string'), '并集条目带 callId/childSessionId')
+    assert.ok(union[0].parentSessionId !== undefined, '并集条目带 parentSessionId')
+    store9b.linkCall('call-orphan', 'top-p', 'pwsh', 'child-none')
+    assert.equal(store9b.allCalls().length, 2, '孤儿 callId 不入并集')
+
+    // ---- 客户端兜底改线（静态检查）：无 sessionId 也查 /calls + 运行期重试 + headMeta 取 result/assistant。
+    const clientSrc9 = await readFile(join(ROOT, 'lib/client.js'), 'utf8')
+    assert.ok(clientSrc9.includes("qs = sessionId !== '' ?"), '客户端 /calls 兜底带可选 sessionId（owner 无会话身份时按 callId 全局匹配）')
+    assert.ok(clientSrc9.includes("tries < 30"), '客户端运行期兜底重试（注册竞态防护）')
+    assert.ok(clientSrc9.includes("steps[i].kind === 'result' || steps[i].kind === 'assistant'"), '框头摘要取最后非空 result/assistant 文本')
+    pass('多 end-seed 切割 / raw 枚举 / ask 中继 output / 三级降级链 / 展示卫生 / calls 并集全部通过')
+  } catch (error) {
+    fail(`0.2.1-rc.3+ 回归：${error.message}`)
+  }
+}
+
+const tests = [test1, test2, test3, test3b, test4, test5, test6, test7, test8, test9]
 for (const test of tests) await test()
 console.log(failed === 0 ? `\n全部通过（${results.length} 项）` : `\n存在失败：${failed} 项`)
 process.exit(failed === 0 ? 0 : 1)

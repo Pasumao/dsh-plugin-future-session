@@ -21,13 +21,13 @@ The reality session's context holds only "one tool call + one conclusion". The f
    - intermediates are worthless (file listings, noise) → `future_return(summary[, raw])`: the conclusion becomes the tool result in the reality session (tagged `[future-session]`); an optional `raw` attachment can be fetched later with `future_fetch` without re-executing anything;
    - the process matters later (≥3 tool calls, structured detail, or user interaction needed) → `future_promote(report)`: the future session's full process (narrative + calls + results) is **merged into the reality session's context**; the reality session is not sealed and keeps running (0.5.0 semantics).
 5. **Identity is not declared by diverging prompts** (that would break caching): both sides see the same protocol section and the same tool names. The model self-detects from tool results — raw data means it is the future session; a `[future-session]`-tagged conclusion means it is the reality session.
-6. Safety net: the reality session may call `future_peek(sessionId)` for a step-by-step summary of a future session (the prompt says: avoid if possible). `future_fetch(sessionId)` retrieves raw output attached via `future_return`.
+6. Safety net: the reality session may call `future_peek(sessionId)` for a step-by-step summary of a future session (the prompt says: avoid if possible). It shares the `/transcript` data pipeline (registration check → live snapshot / persisted file → only events after the fork point) and only accepts future sessions registered by this plugin. `future_fetch(sessionId)` retrieves raw output attached via `future_return`.
 
 Interactive tools (`ask_user_question` / `ask_user_choice`) are **not** shadowed — they always run locally in the reality session. Inside a future session they become **relays**: the question surfaces as a card in the reality session's tool row; the user's answer wakes the future session in place.
 
 ### Collapsible panel (client UI)
 
-The user interface always stays in the reality session. Each delegated tool call renders an inline collapsible panel that polls the future session's step-by-step transcript while running, then collapses to a one-line summary. Relay questions render as clickable cards inside the panel.
+The user interface always stays in the reality session. Each delegated tool call renders an inline collapsible panel that polls the future session's step-by-step transcript while running, then collapses to a one-line summary. Relay questions render as clickable cards inside the panel. While running, the child session id is resolved via the `GET /calls` fallback index (omitting `sessionId` returns a global union — the core keyed toolview owner carries no session identity), so the panel appears during the whole run (0.5.2). After the call settles, the panel folds into the core turn-process group (core layout design).
 
 ## Host routes (client data plane, loopback-only)
 
@@ -35,7 +35,7 @@ The user interface always stays in the reality session. Each delegated tool call
 |---|---|
 | `GET /mode?sessionId=` · `PUT /mode` | Mode read / switch (slider toggle) |
 | `GET /tools[?sessionId=]` | Shadow tool name catalog (keyed client views) |
-| `GET /calls?sessionId=` | `callId → future session id` index (fallback) |
+| `GET /calls[?sessionId=]` | `callId → future session id` index (fallback; omitting `sessionId` returns a global union, tail-capped at 2000) |
 | `GET /transcript?sessionId=&limit=` | Future session transcript (**only sessions registered by this plugin**) |
 | `POST /answer` | Relay-question answer submission |
 
