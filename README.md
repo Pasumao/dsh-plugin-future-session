@@ -47,7 +47,15 @@
 ## 安装
 
 ```powershell
-node <dsh>/lib/bin.js plugin --profile <profile> add <本插件目录>
+git clone https://github.com/Pasumao/dsh-plugin-future-session.git
+node <dsh>/lib/bin.js plugin --profile <profile> add <克隆目录>\dsh-plugin-future-session
+```
+
+或从 npm 安装后挂载：
+
+```powershell
+npm install dsh-plugin-future-session
+node <dsh>/lib/bin.js plugin --profile <profile> add <profile>\node_modules\dsh-plugin-future-session
 ```
 
 重启 Desktop 客户端后生效（启动日志中不应出现 `skipping profile bundle "dsh-plugin-future-session"`）。

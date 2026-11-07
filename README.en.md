@@ -42,7 +42,15 @@ The user interface always stays in the reality session. Each delegated tool call
 ## Install
 
 ```powershell
-node <dsh>/lib/bin.js plugin --profile <profile> add <path-to-this-plugin>
+git clone https://github.com/Pasumao/dsh-plugin-future-session.git
+node <dsh>/lib/bin.js plugin --profile <profile> add <clone-dir>\dsh-plugin-future-session
+```
+
+Or install from npm and mount it:
+
+```powershell
+npm install dsh-plugin-future-session
+node <dsh>/lib/bin.js plugin --profile <profile> add <profile>\node_modules\dsh-plugin-future-session
 ```
 
 Restart the Desktop client afterwards (the startup log must not contain `skipping profile bundle "dsh-plugin-future-session"`).
